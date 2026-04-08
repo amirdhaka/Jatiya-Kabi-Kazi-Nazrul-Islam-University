@@ -1,232 +1,197 @@
+import requests
+import asyncio
+from bs4 import BeautifulSoup
 from flask import Flask
 from threading import Thread
+import os
 
-# ================= KEEP ALIVE =================
-app_web = Flask('')
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    CallbackQueryHandler
+)
 
-@app_web.route('/')
+# ----------- 1. KEEP ALIVE SERVER (For Render 24/7) -----------
+app = Flask('')
+
+@app.route('/')
 def home():
-    return "Bot is running!"
+    return "JKKNIU Bot is Online!"
 
 def run():
-    app_web.run(host='0.0.0.0', port=10000)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# ================= ORIGINAL CODE =================
-import requests
-import time
-import csv
-import os
-from bs4 import BeautifulSoup
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+# ----------- 2. CONFIGURATION -----------
+# আপনার টোকেনটি অটোমেটিক বসানো হয়েছে
+BOT_TOKEN = "8469596986:AAEcEr4Bm-MIhzshNkQ3rO2t4sc84AktzmI"
 
-TOKEN = "8643223258:AAF2qByjhoWCUhgWqv1_zWkoaHMx6anPwXg"
-FILE_NAME = "data.csv"
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+}
 
-last_range = {}
-
-def init_file():
-    if not os.path.exists(FILE_NAME):
-        with open(FILE_NAME, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["Name","Roll","Board","Mobile","Date","TranID"])
-
-def is_duplicate(tran_id):
-    if not os.path.exists(FILE_NAME):
-        return False
-    with open(FILE_NAME, "r", encoding="utf-8") as f:
-        return any(tran_id in row for row in f)
-
-def save_data(name, roll, board, mobile, date, tran_id):
-    if is_duplicate(tran_id):
-        return
-    with open(FILE_NAME, "a", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow([name, roll, board, mobile, date, tran_id])
-
-def get_tran_ids(roll):
-    url = f"https://billpay.sonalibank.com.bd/BoardRescrutiny/Home/Search?searchStr={roll}"
-    res = requests.get(url)
-    soup = BeautifulSoup(res.text, "html.parser")
-
-    ids = []
+# ----------- 3. JKKNIU DATA SCRAPER -----------
+def get_data(tid):
+    url = f"https://billpay.sonalibank.com.bd/JKKNIU/Home/Voucher/{tid}"
     try:
-        rows = soup.find("table").find_all("tr")[1:]
-        for r in rows:
-            ids.append(r.find_all("td")[1].text.strip())
+        r = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        
+        data = {
+            "Transaction ID": tid, "Fee Details": "", "Name": "", 
+            "Reg No": "N/A", "Student Id": "N/A", "Mobile": "N/A", 
+            "Amount(BDT)": "", "Date": "Not Found"
+        }
+        
+        # টেবিল থেকে তথ্য সংগ্রহ
+        rows = soup.find_all("tr")
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) >= 2:
+                key = cols[0].get_text(strip=True).replace(":", "")
+                val = cols[1].get_text(strip=True)
+                
+                if "Fee Details" in key: data["Fee Details"] = val
+                elif "Name" in key: data["Name"] = val
+                elif "Reg No" in key: data["Reg No"] = val
+                elif "Student Id" in key: data["Student Id"] = val
+                elif "Mobile" in key: data["Mobile"] = val
+                elif "Amount" in key: data["Amount(BDT)"] = val
+                elif "Date" in key: data["Date"] = val
+
+        # তারিখ ফিক্স (পুরো পেজ স্ক্যান করে তারিখ বের করার লজিক)
+        if data["Date"] == "Not Found":
+            all_text = soup.find_all(string=lambda x: x and "Date" in x)
+            for text in all_text:
+                parent_text = text.parent.get_text(strip=True)
+                if ":" in parent_text:
+                    possible_date = parent_text.split(":")[-1].strip()
+                    if len(possible_date) >= 8:
+                        data["Date"] = possible_date
+                        break
+
+        return data
     except:
-        pass
-
-    return ids
-
-def get_full_data(tran_id):
-    url = f"https://billpay.sonalibank.com.bd/BoardRescrutiny/Home/Voucher/{tran_id}"
-    res = requests.get(url)
-    soup = BeautifulSoup(res.text, "html.parser")
-
-    try:
-        lines = [l.strip() for l in soup.get_text("\n").split("\n") if l.strip()]
-
-        def find(label):
-            for i in range(len(lines)):
-                if label in lines[i]:
-                    return lines[i+1]
-            return "Not found"
-
-        name = find("Name")
-        roll = find("Roll")
-        board = find("Board")
-        mobile = find("Mobile")
-        date = find("Date")
-
-        save_data(name, roll, board, mobile, date, tran_id)
-
-        text = f"""<pre>
-Name   : {name}
-Roll   : {roll}
-Board  : {board}
-Mobile : {mobile}
-Date   : {date}
-ID     : {tran_id}
-</pre>"""
-
-        return text, mobile
-    except:
-        return None, None
-
-def format_number_bd(mobile):
-    n = mobile.replace("+","").replace(" ","")
-    if n.startswith("01"):
-        return "880"+n[1:]
-    if n.startswith("880"):
-        return n
-    return None
-
-def get_contact_buttons(mobile):
-    n = format_number_bd(mobile)
-    if not n:
         return None
 
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📱 WhatsApp", url=f"https://wa.me/{n}"),
-        InlineKeyboardButton("✈️ Telegram", url=f"https://t.me/+{n}")
-    ]])
+# ----------- 4. RESULT SENDER -----------
+async def process_roll(update_or_query, data_list):
+    final_text = ""
+    unique_phones = []
+    
+    for i, data in enumerate(data_list, 1):
+        phone = data["Mobile"]
+        wa_phone = "880" + phone[1:] if (phone.startswith("0") and len(phone) >= 11) else phone
+        
+        final_text += (
+            f"📄 JKKNIU Result {i}\n"
+            f"<pre>\n"
+            f"Transaction ID: {data['Transaction ID']}\n"
+            f"Fee Details   : {data['Fee Details']}\n"
+            f"Name          : {data['Name']}\n"
+            f"Reg No        : {data['Reg No']}\n"
+            f"Student Id    : {data['Student Id']}\n"
+            f"Mobile        : {data['Mobile']}\n"
+            f"Amount(BDT)   : {data['Amount(BDT)']}\n"
+            f"Date          : {data['Date']}\n"
+            f"</pre>\n\n"
+        )
+        
+        if phone != "N/A" and wa_phone not in unique_phones:
+            unique_phones.append(wa_phone)
 
-def next_button():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➡️ Next 50", callback_data="next50")]
-    ])
-
-def get_keyboard():
-    return ReplyKeyboardMarkup(
-        [["🚀 Start"],["📂 Search Database"],["📥 Download Data"]],
-        resize_keyboard=True
+    keyboard = []
+    for ph in unique_phones:
+        # বাটন থেকে নাম্বার সরিয়ে শুধু পরিষ্কার লেবেল রাখা হয়েছে
+        keyboard.append([
+            InlineKeyboardButton("📱 WhatsApp", url=f"https://wa.me/{ph}"),
+            InlineKeyboardButton("📢 Telegram", url=f"https://t.me/{ph}")
+        ])
+    
+    msg_source = update_or_query.message if hasattr(update_or_query, 'message') else update_or_query
+    await msg_source.reply_text(
+        final_text, 
+        parse_mode="HTML", 
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
     )
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome!", reply_markup=get_keyboard())
-
-async def run_range(message, context, start, end):
-    status = await message.reply_text("⏳ Processing...")
-    count = 0
-
-    for roll in range(start, end+1):
-        await status.edit_text(f"⏳ Processing...\n🔢 Roll: {roll}\n📊 Found: {count}")
-
-        for tid in get_tran_ids(roll):
-            data, mobile = get_full_data(tid)
-
-            if data:
-                count += 1
-                await message.reply_text(
-                    f"📄 Result {count}:\n{data}",
-                    parse_mode="HTML",
-                    reply_markup=get_contact_buttons(mobile)
-                )
-
-        time.sleep(2)
-
-    await status.edit_text(f"✅ Done!\n📊 Total: {count}")
-    await message.reply_text("👉 Next 50?", reply_markup=next_button())
-
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.message.from_user.id
-
-    if text == "🚀 Start":
-        await update.message.reply_text("✅ Ready!", reply_markup=get_keyboard())
-        return
-
-    if text == "📂 Search Database":
-        await update.message.reply_text("👉 Roll বা Range দাও (max 50)")
-        return
-
-    if text == "📥 Download Data":
-        if os.path.exists(FILE_NAME):
-            await update.message.reply_document(open(FILE_NAME,"rb"))
-        else:
-            await update.message.reply_text("❌ No data")
-        return
-
-    if text.isdigit():
-        await update.message.reply_text("⏳ Searching...")
-        for i, tid in enumerate(get_tran_ids(int(text)),1):
-            data, mobile = get_full_data(tid)
-            if data:
-                await update.message.reply_text(
-                    f"📄 Result {i}:\n{data}",
-                    parse_mode="HTML",
-                    reply_markup=get_contact_buttons(mobile)
-                )
-        return
-
-    if "-" in text:
+# ----------- 5. CORE SEARCH ENGINE -----------
+async def run_search(update_or_query, context, start_r, end_r):
+    rolls = list(range(start_r, end_r + 1))
+    context.user_data["current_end"] = end_r
+    
+    msg_source = update_or_query.message if hasattr(update_or_query, 'message') else update_or_query
+    status_msg = await msg_source.reply_text("⏳ Searching JKKNIU Portal...")
+    
+    total_found = 0
+    for i, roll in enumerate(rolls, 1):
         try:
-            start_r, end_r = map(int, text.split("-"))
-        except:
-            await update.message.reply_text("❌ Wrong format")
-            return
+            url = f"https://billpay.sonalibank.com.bd/JKKNIU/Home/Search?searchStr={roll}"
+            r = requests.get(url, headers=headers, timeout=10)
+            
+            if "Details" in r.text:
+                soup = BeautifulSoup(r.text, "html.parser")
+                links = soup.select("a[href*='Voucher']")
+                data_list = []
+                for link in links:
+                    tid = link['href'].split("/")[-1]
+                    d = get_data(tid)
+                    if d and d["Name"]: data_list.append(d)
+                
+                if data_list:
+                    total_found += 1
+                    await process_roll(update_or_query, data_list)
 
-        if (end_r-start_r+1) > 50:
-            await update.message.reply_text("❌ Max 50")
-            return
+            await status_msg.edit_text(
+                f"⏳ Scanning JKKNIU...\n"
+                f"🔢 Roll/Reg: {roll}\n"
+                f"📊 Found: {total_found}\n"
+                f"✅ Progress: {i}/{len(rolls)}"
+            )
+        except: continue
 
-        last_range[user_id] = (start_r, end_r)
-        await run_range(update.message, context, start_r, end_r)
-        return
+    next_kb = [[InlineKeyboardButton("👉 Next 500?", callback_data="next_500")]]
+    await msg_source.reply_text(f"✅ JKKNIU Scan Done!\n📊 Total: {total_found}", reply_markup=InlineKeyboardMarkup(next_kb))
 
-    await update.message.reply_text("❌ Invalid input")
+# ----------- 6. HANDLERS -----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton("Start Search", callback_data="btn_ready")]]
+    await update.message.reply_text("জাতীয় কবি কাজী নজরুল ইসলাম বিশ্ববিদ্যালয় ফি চেক বট শুরু করুন:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def handle_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        if "-" in text:
+            s, e = map(int, text.split("-"))
+            await run_search(update, context, s, e)
+        else:
+            r = int(text)
+            await run_search(update, context, r, r)
+    except: pass
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if query.data == "btn_ready":
+        await query.message.reply_text("🚀 Ready for JKKNIU ID/Reg Number Search!")
+    elif query.data == "next_500":
+        last_end = context.user_data.get("current_end", 0)
+        if last_end > 0:
+            await run_search(query, context, last_end + 1, last_end + 500)
 
-    user_id = query.from_user.id
-
-    if user_id not in last_range:
-        await query.message.reply_text("❌ আগে search করো")
-        return
-
-    start_r, end_r = last_range[user_id]
-    new_start = end_r + 1
-    new_end = end_r + 50
-
-    last_range[user_id] = (new_start, new_end)
-
-    await query.message.reply_text(f"🔄 Auto: {new_start}-{new_end}")
-    await run_range(query.message, context, new_start, new_end)
-
-# ================= RUN =================
-init_file()
-keep_alive()  # 🔥 THIS IS THE MAGIC
-
-app = ApplicationBuilder().token(TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT, handle))
-app.add_handler(CallbackQueryHandler(handle_next))
-
-print("🤖 BOT RUNNING 24/7...")
-app.run_polling()
+# ----------- 7. MAIN START -----------
+if __name__ == "__main__":
+    keep_alive()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print("✅ JKKNIU Final Bot is Online!")
+    application.run_polling()
